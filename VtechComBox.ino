@@ -1,3 +1,11 @@
+//TODO!!!
+//aktualnie powinien liczyć czas przywarcia do masy sygnału RPM, a chcemy duty cycle, czyli muszę
+//policzyć czas sygnału wysokiego czyli po aktywacji ISR1 zapamietać czas i przy kolejnym ISR0 obliczyć ile trwał 
+//lub całkowity czas ISR0 od sygnału do kolejnego sygnału.
+//Mogę też policzyć duty cycle z obrotów i czasu przywarcia
+
+
+
 /*****************************************************************************************************************
 ComBox v.3.2 for V-tech Dyno software (min. ver. 6.3.23.90)
 Maciej Strzebonski fuse@vtech.pl
@@ -6,7 +14,15 @@ COM7 port by default
 Bit rate: 115200, Data bits: 8, Parity: none, Stop bits: 1, Flow control: no
 
 D2 - rpm input (Garrett RPM)
-D3 - connect to D2
+
+D2 --|>|-- (schottkie diode, high voltage for injector) to rpm signal
+    |
+    = (100 pF)
+    |
+   gnd
+
+D3 - must by connected to D2
+
 D4, D5, D6 - blades_config (number of blades = blades_config + 8)
  D4 - blades_config bit0 (D3 short to gnd = 1)
  D5 - blades_config bit1 (D4 short to gnd = 1)
@@ -15,7 +31,7 @@ D4, D5, D6 - blades_config (number of blades = blades_config + 8)
 D7 - engine rpm mode
   D7 short to gnd, D4, D5, D6 unconnected = one spark per two revolutions of the crankshaft
   D7, D4, D5, D6 unconnected = one spark per one revolution of the crankshaft
-D8 - rpm reading averaging mode (short to gnd 2x faster reading)
+D8 - rpm reading averaging mode (short to gnd to incrase filtering x2)
 
 A0 - analog input (AIN 0)
 A1 - analog input (AIN 1)
@@ -33,28 +49,29 @@ MAX6675#2 (EGT 2):
  CS  -> D9
 
 Data frame: <STX>G0001112223334444455555<ETX><CR><LF>
- G - header
- 000 - A0 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
- 111 - A1 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
- 222 - A2 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
- 333 - A3 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
+     G - header
+   000 - A0 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
+   111 - A1 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
+   222 - A2 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
+   333 - A3 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
  44444 - D2 (digital input in rpm) in hex format min.00000h, max.FFFFFh
  55555 - D2 (digital input duty cycle low level in microseconds) in hex format min.00000h, max.FFFFFh
 
 Data frame: <STX>H000111XX22224444455555<ETX><CR><LF>
- H - header
- 000 - A0 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
- 111 - A1 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
- XX - "00" characters without meaning
- 2222 - MAX6675#1 (temperature input in °C) * 10 in hex format min.0000h (0°C), max.27FEh (10238 / 10 = 1023.8°C)
+     H - header
+   000 - A0 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
+   111 - A1 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
+    XX - "00" characters without meaning
+  2222 - MAX6675#1 (temperature input in °C) * 10 in hex format min.0000h (0°C), max.27FEh (10238 / 10 = 1023.8°C)
  44444 - D2 (digital input in rpm) in hex format min.00000h, max.FFFFFh
  55555 - D2 (digital input duty cycle low level in microseconds) in hex format min.00000h, max.FFFFFh
 
-Data frame: <STX>I0000111122224444455555<ETX><CR><LF>
- I - header
- 0000 - A0 (analog input in V) * 1023 / 5 in hex format min.0000h (0V), max.03FFh (1023 * 5 / 1023 = 5V)
- 1111 - MAX6675#2 (temperature input in °C) * 10 in hex format min.0000h (0°C), max.27FEh (10238 / 10 = 1023.8°C)
- 2222 - MAX6675#1 (temperature input in °C) * 10 in hex format min.0000h (0°C), max.27FEh (10238 / 10 = 1023.8°C)
+Data frame: <STX>I000X111122224444455555<ETX><CR><LF>
+     I - header
+   000 - A0 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
+     X - "0" character without meaning
+  1111 - MAX6675#2 (temperature input in °C) * 10 in hex format min.0000h (0°C), max.27FEh (10238 / 10 = 1023.8°C)
+  2222 - MAX6675#1 (temperature input in °C) * 10 in hex format min.0000h (0°C), max.27FEh (10238 / 10 = 1023.8°C)
  44444 - D2 (digital input in rpm) in hex format min.00000h, max.FFFFFh
  55555 - D2 (digital input duty cycle low level in microseconds) in hex format min.00000h, max.FFFFFh
 *****************************************************************************************************************/
@@ -101,7 +118,7 @@ volatile byte rpmErrorCnt;
 volatile byte watchDog;
 volatile byte bladesCfg = 0;
 volatile byte blades = 8;
-volatile byte average = 10;
+volatile byte average = 5;
 volatile unsigned long ain = 0;
 volatile double vin = 0;
 char STX = 2;
@@ -214,9 +231,10 @@ void loop() {
 #if defined(HEADER_I)
     if (ainChannel == 0) {
       stringToSendAin = String(ain, HEX);
-      for (int i = stringToSendAin.length(); i < 4; i++) {
+      for (int i = stringToSendAin.length(); i < 3 i++) {
         stringToSendAin = "0" + stringToSendAin;
       }
+      stringToSendAin += "0";
     }
     else if (ainChannel == 1) {
       stringToSendAin = String(temp_int2, HEX);
@@ -237,18 +255,18 @@ void loop() {
   #if defined(HEADER_H)
       if (ainChannel == 0 || ainChannel == 1) {
   #endif
-        stringToSendAin = String(ain, HEX);
+        stringToSendAin = String(ain, HEX); //HEADER_G ainCannel 0, 1, 2, 3
         for (int i = stringToSendAin.length(); i < 3; i++) {
           stringToSendAin = "0" + stringToSendAin;
         }
   #if defined(HEADER_H)
-      }   
+      }
+      stringToSendAin += "00";
       else if (ainChannel == 2) {
         stringToSendAin = String(temp_int, HEX);
         for (int i = stringToSendAin.length(); i < 4; i++) {
           stringToSendAin = "0" + stringToSendAin;
         }
-        stringToSendAin = "00" + stringToSendAin;
       }
       else if (ainChannel == 3) {
         stringToSendAin = "";
@@ -267,7 +285,7 @@ void loop() {
   }
 
   stringToSendRpm = String(rpm, HEX);
-  rpmIsCounting = false;
+//  rpmIsCounting = false;
 
   for (int i = stringToSendRpm.length(); i < 5; i++) {
     stringToSendRpm = "0" + stringToSendRpm;
@@ -285,6 +303,8 @@ void loop() {
   stringToSend += stringToSendRpm;
   stringToSend += ETX;
   Serial.println(stringToSend);
+  Serial.flush();
+  rpmIsCounting = false;
   
   if (digitalRead(bit0Blade) == 0) bitSet(bladesCfg, 0);
   else bitClear(bladesCfg, 0);
@@ -306,8 +326,8 @@ void loop() {
 
   blades = bladesCfg + rpmMode;
 
-  if (digitalRead(averageNumber) == 0) average = 5;
-  else average = 10;
+  if (digitalRead(averageNumber) == 0) average = 10;
+  else average = 5;
   
   delay(10);
 }
