@@ -1,20 +1,21 @@
 /*****************************************************************************************************************
-ComBox v.3.1 for V-tech Dyno software (min. ver. 6.3.22.28)
+ComBox v.3.2 for V-tech Dyno software (min. ver. 6.3.23.90)
 Maciej Strzebonski fuse@vtech.pl
 Arduino UNO
 COM7 port by default
 Bit rate: 115200, Data bits: 8, Parity: none, Stop bits: 1, Flow control: no
 
 D2 - rpm input (Garrett RPM)
-D3, D4, D5 - blades_config (number of blades = blades_config + 8)
- D3 - blades_config bit0 (D3 short to gnd = 1)
- D4 - blades_config bit1 (D4 short to gnd = 1)
- D5 - blades_config bit2 (D5 short to gnd = 1)
+D3 - connect to D2
+D4, D5, D6 - blades_config (number of blades = blades_config + 8)
+ D4 - blades_config bit0 (D3 short to gnd = 1)
+ D5 - blades_config bit1 (D4 short to gnd = 1)
+ D6 - blades_config bit2 (D5 short to gnd = 1)
 
-D6 - engine rpm mode
-  D6 short to gnd, D3, D4, D5 unconnected = one spark per two revolutions of the crankshaft
-  D6, D3, D4, D5 unconnected = one spark per one revolution of the crankshaft
-D7 - rpm reading averaging mode (short to gnd 2x faster reading)
+D7 - engine rpm mode
+  D7 short to gnd, D4, D5, D6 unconnected = one spark per two revolutions of the crankshaft
+  D7, D4, D5, D6 unconnected = one spark per one revolution of the crankshaft
+D8 - rpm reading averaging mode (short to gnd 2x faster reading)
 
 A0 - analog input (AIN 0)
 A1 - analog input (AIN 1)
@@ -31,33 +32,36 @@ MAX6675#2 (EGT 2):
  SCK -> D13
  CS  -> D9
 
-Data frame: <STX>G00011122233344444<ETX><CR><LF>
+Data frame: <STX>G0001112223334444455555<ETX><CR><LF>
  G - header
  000 - A0 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
  111 - A1 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
  222 - A2 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
  333 - A3 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
  44444 - D2 (digital input in rpm) in hex format min.00000h, max.FFFFFh
+ 55555 - D2 (digital input duty cycle low level in microseconds) in hex format min.00000h, max.FFFFFh
 
-Data frame: <STX>H000111XX222244444<ETX><CR><LF>
+Data frame: <STX>H000111XX22224444455555<ETX><CR><LF>
  H - header
  000 - A0 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
  111 - A1 (analog input in V) * 1023 / 5 in hex format min.000h (0V), max.3FFh (1023 * 5 / 1023 = 5V)
  XX - "00" characters without meaning
  2222 - MAX6675#1 (temperature input in °C) * 10 in hex format min.0000h (0°C), max.27FEh (10238 / 10 = 1023.8°C)
  44444 - D2 (digital input in rpm) in hex format min.00000h, max.FFFFFh
+ 55555 - D2 (digital input duty cycle low level in microseconds) in hex format min.00000h, max.FFFFFh
 
-Data frame: <STX>I00001111222244444<ETX><CR><LF>
+Data frame: <STX>I0000111122224444455555<ETX><CR><LF>
  I - header
  0000 - A0 (analog input in V) * 1023 / 5 in hex format min.0000h (0V), max.03FFh (1023 * 5 / 1023 = 5V)
  1111 - MAX6675#2 (temperature input in °C) * 10 in hex format min.0000h (0°C), max.27FEh (10238 / 10 = 1023.8°C)
  2222 - MAX6675#1 (temperature input in °C) * 10 in hex format min.0000h (0°C), max.27FEh (10238 / 10 = 1023.8°C)
  44444 - D2 (digital input in rpm) in hex format min.00000h, max.FFFFFh
+ 55555 - D2 (digital input duty cycle low level in microseconds) in hex format min.00000h, max.FFFFFh
 *****************************************************************************************************************/
 
 //choose one of the three options:
-//#define HEADER_G // "G" = 4x AIN + 1x RPM
-#define HEADER_H // "H" = 2x AIN + 1x TK + 1x RPM
+#define HEADER_G // "G" = 4x AIN + 1x RPM
+//#define HEADER_H // "H" = 2x AIN + 1x TK + 1x RPM
 //#define HEADER_I // "I" = 1x AIN + 2x TK + 1x RPM
 
 #if defined(HEADER_H) || defined(HEADER_I)
@@ -78,13 +82,17 @@ Data frame: <STX>I00001111222244444<ETX><CR><LF>
   int temp_int2;
 #endif
 
-volatile unsigned long currentUs;
+volatile unsigned long currentUsISR0;
+volatile unsigned long currentUsISR1;
 volatile unsigned long printUs;
 volatile unsigned long startUs;
 volatile unsigned long sparkUs;
 volatile unsigned long rpmMode;
+volatile unsigned long rpmDuty;
+
 volatile byte sparkCounter;
-volatile byte rpmReady;
+volatile bool rpmIsCounting;
+volatile bool rpmDutyReady;
 volatile unsigned long rpm;
 volatile unsigned long rpmMaxError;
 volatile double rpmDouble;
@@ -116,23 +124,25 @@ String nullStringToSendAin = "000000000000";
   String stringHeaderAin = "I";
 #endif
 
-#define bit0Blade 3
-#define bit1Blade 4
-#define bit2Blade 5
-#define rpmInput 2
-#define engineRpmMode 6
-#define averageNumber 7
-#define rpmTest 8
+#define rpmInput      2
+#define rpmduty       3
+#define bit0Blade     4 //3
+#define bit1Blade     3 //4
+#define bit2Blade     6 //5
+#define engineRpmMode 7 //6
+#define averageNumber 8 //7
+//#define rpmTest       8
 
 void setup() {
   pinMode(bit0Blade, INPUT_PULLUP);
   pinMode(bit1Blade, INPUT_PULLUP);
   pinMode(bit2Blade, INPUT_PULLUP);
+  pinMode(rpmduty, INPUT_PULLUP);
   pinMode(rpmInput, INPUT_PULLUP);
   pinMode(engineRpmMode, INPUT_PULLUP);
   pinMode(averageNumber, INPUT_PULLUP);
-  pinMode(rpmTest, OUTPUT);
-  digitalWrite(rpmTest, LOW);
+  //pinMode(rpmTest, OUTPUT);
+  //digitalWrite(rpmTest, LOW);
   stringHeaderAin = STX + stringHeaderAin;
   nullStringToSendAin = stringHeaderAin + nullStringToSendAin;
   nullStringToSendAin += nullStringToSendRpm;
@@ -149,6 +159,7 @@ void setup() {
 #endif
   delay(100);
   attachInterrupt(digitalPinToInterrupt(rpmInput), ISR0, FALLING);
+  attachInterrupt(digitalPinToInterrupt(rpmduty), ISR1, RISING);
 }
 
 void loop() {
@@ -250,11 +261,22 @@ void loop() {
   watchDog++;
 
   if (watchDog == 10) {
-    rpm = 0;    
+    rpm = 0;
+    if (digitalRead(rpmduty) == 0) rpmDuty = 1048575;
+    else rpmDuty = 0;
   }
 
   stringToSendRpm = String(rpm, HEX);
-  rpmReady = 0;
+  rpmIsCounting = false;
+
+  for (int i = stringToSendRpm.length(); i < 5; i++) {
+    stringToSendRpm = "0" + stringToSendRpm;
+  }
+
+  stringToSend += stringToSendRpm;
+  Serial.println(stringToSend);
+
+  stringToSendRpm = String(rpmDuty, HEX);
 
   for (int i = stringToSendRpm.length(); i < 5; i++) {
     stringToSendRpm = "0" + stringToSendRpm;
@@ -291,20 +313,21 @@ void loop() {
 }
 
 void ISR0() {
-  currentUs = micros();
+  currentUsISR0 = micros();
   watchDog = 0;
+  rpmDutyReady = false;
 
-  digitalWrite(rpmTest, HIGH);
+  //digitalWrite(rpmTest, HIGH);
 
-  if (rpmReady == 0) {
+  if (!rpmIsCounting) {
     sparkCounter++;
 
     if (sparkCounter == 1) {
-      startUs = currentUs;
+      startUs = currentUsISR0;
     }
     else if (sparkCounter > average) {
-      rpmReady = 1;
-      sparkUs = currentUs - startUs;
+      rpmIsCounting = true;
+      sparkUs = currentUsISR0 - startUs;
       sparkCounter = 0;   
       sparkUs *= blades;
 
@@ -337,5 +360,12 @@ void ISR0() {
       }
     }
   }
-  digitalWrite(rpmTest, LOW);
+  //digitalWrite(rpmTest, LOW);
+}
+
+void ISR1() {
+  currentUsISR1 = micros();
+  if (currentUsISR1 > currentUsISR0) rpmDuty = currentUsISR1 - currentUsISR0;
+  else rpmDuty = 0;
+  rpmDutyReady = true;
 }
