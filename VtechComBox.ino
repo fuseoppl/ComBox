@@ -1,19 +1,11 @@
-//TODO!!!
-//aktualnie powinien liczyć czas przywarcia do masy sygnału RPM, a chcemy duty cycle, czyli muszę
-//policzyć czas sygnału wysokiego czyli po aktywacji ISR1 zapamietać czas i przy kolejnym ISR0 obliczyć ile trwał 
-//lub całkowity czas ISR0 od sygnału do kolejnego sygnału.
-//Mogę też policzyć duty cycle z obrotów i czasu przywarcia
-
-
-
 /*****************************************************************************************************************
-ComBox v.3.2 for V-tech Dyno software (min. ver. 6.3.23.90)
+ComBox v.3.2 for V-tech Dyno software (min. ver. 6.3.23.87)
 Maciej Strzebonski fuse@vtech.pl
 Arduino UNO
 COM7 port by default
 Bit rate: 115200, Data bits: 8, Parity: none, Stop bits: 1, Flow control: no
 
-D2 - rpm input (Garrett RPM)
+D2 - rpm input (Garrett rotor speed sensor, injectors, etc.)
 
 D2 --|>|-- (schottkie diode, high voltage for injector) to rpm signal
     |
@@ -21,16 +13,19 @@ D2 --|>|-- (schottkie diode, high voltage for injector) to rpm signal
     |
    gnd
 
-D3 - must by connected to D2
+D3 - must by connected to D2 for measuring duty cycle
 
 D4, D5, D6 - blades_config (number of blades = blades_config + 8)
- D4 - blades_config bit0 (D3 short to gnd = 1)
- D5 - blades_config bit1 (D4 short to gnd = 1)
- D6 - blades_config bit2 (D5 short to gnd = 1)
+ D4 - blades_config bit0 (D4 short to gnd = 1)
+ D5 - blades_config bit1 (D5 short to gnd = 1)
+ D6 - blades_config bit2 (D6 short to gnd = 1)
+
+D6(high), D5(gnd),  D4(high) = 2 (binary 010) + 8 = 10 blades
+D6(high), D5(high), D4(gnd)  = 1 (binary 001) + 8 =  9 blades
 
 D7 - engine rpm mode
   D7 short to gnd, D4, D5, D6 unconnected = one spark per two revolutions of the crankshaft
-  D7, D4, D5, D6 unconnected = one spark per one revolution of the crankshaft
+  D7 short to gnd, D4, D5, D6 unconnected = one spark per one revolution of the crankshaft
 D8 - rpm reading averaging mode (short to gnd to incrase filtering x2)
 
 A0 - analog input (AIN 0)
@@ -105,14 +100,16 @@ volatile unsigned long printUs;
 volatile unsigned long startUs;
 volatile unsigned long sparkUs;
 volatile unsigned long rpmMode;
-volatile unsigned long rpmDuty;
+volatile unsigned long rpmDutyTimeLow;
+volatile unsigned long rpmDutyTimeHigh;
+volatile unsigned long rpmDutyPrc;
 
 volatile byte sparkCounter;
 volatile bool rpmIsCounting;
 volatile bool rpmDutyReady;
 volatile unsigned long rpm;
 volatile unsigned long rpmMaxError;
-volatile double rpmDouble;
+volatile float rpmDouble;
 volatile unsigned long rpmOld;
 volatile byte rpmErrorCnt;
 volatile byte watchDog;
@@ -120,12 +117,14 @@ volatile byte bladesCfg = 0;
 volatile byte blades = 8;
 volatile byte average = 5;
 volatile unsigned long ain = 0;
-volatile double vin = 0;
+volatile float vin = 0;
 char STX = 2;
 char ETX = 3;
 String stringToSend = "";
 String stringToSendRpm = "";
 String nullStringToSendRpm = "00000";
+String stringToSendDuty = "";
+String nullStringToSendDuty = "00000";
 String stringToSendAin = "";
 String nullStringToSendAin = "000000000000";
 
@@ -142,9 +141,9 @@ String nullStringToSendAin = "000000000000";
 #endif
 
 #define rpmInput      2
-#define rpmduty       3
+#define rpmDutyPin    3
 #define bit0Blade     4 //3
-#define bit1Blade     3 //4
+#define bit1Blade     5 //4
 #define bit2Blade     6 //5
 #define engineRpmMode 7 //6
 #define averageNumber 8 //7
@@ -154,7 +153,7 @@ void setup() {
   pinMode(bit0Blade, INPUT_PULLUP);
   pinMode(bit1Blade, INPUT_PULLUP);
   pinMode(bit2Blade, INPUT_PULLUP);
-  pinMode(rpmduty, INPUT_PULLUP);
+  pinMode(rpmDutyPin, INPUT_PULLUP);
   pinMode(rpmInput, INPUT_PULLUP);
   pinMode(engineRpmMode, INPUT_PULLUP);
   pinMode(averageNumber, INPUT_PULLUP);
@@ -176,7 +175,7 @@ void setup() {
 #endif
   delay(100);
   attachInterrupt(digitalPinToInterrupt(rpmInput), ISR0, FALLING);
-  attachInterrupt(digitalPinToInterrupt(rpmduty), ISR1, RISING);
+  attachInterrupt(digitalPinToInterrupt(rpmDutyPin), ISR1, RISING);
 }
 
 void loop() {
@@ -221,7 +220,7 @@ void loop() {
       ain += analogRead(ainChannel);
     }
 
-    vin = (double)ain / 200.0;
+    vin = (float)ain / 200.0;
     ain = round(vin);
 
     if (ain > 4095) {
@@ -280,8 +279,8 @@ void loop() {
 
   if (watchDog == 10) {
     rpm = 0;
-    if (digitalRead(rpmduty) == 0) rpmDuty = 1048575;
-    else rpmDuty = 0;
+    if (digitalRead(rpmDutyPin) == 0) rpmDutyPrc = 10000;
+    else rpmDutyPrc = 0;
   }
 
   stringToSendRpm = String(rpm, HEX);
@@ -292,15 +291,14 @@ void loop() {
   }
 
   stringToSend += stringToSendRpm;
-  Serial.println(stringToSend);
 
-  stringToSendRpm = String(rpmDuty, HEX);
+  stringToSendDuty = String(rpmDutyPrc, HEX);
 
-  for (int i = stringToSendRpm.length(); i < 5; i++) {
-    stringToSendRpm = "0" + stringToSendRpm;
+  for (int i = stringToSendDuty.length(); i < 5; i++) {
+    stringToSendDuty = "0" + stringToSendDuty;
   }
 
-  stringToSend += stringToSendRpm;
+  stringToSend += stringToSendDuty;
   stringToSend += ETX;
   Serial.println(stringToSend);
   Serial.flush();
@@ -335,6 +333,12 @@ void loop() {
 void ISR0() {
   currentUsISR0 = micros();
   watchDog = 0;
+  if (rpmDutyReady) {
+    rpmDutyTimeHigh = currentUsISR0 - currentUsISR1;
+    unsigned long _timeTotal = rpmDutyTimeHigh + rpmDutyTimeLow;
+    if (_timeTotal > 0)  rpmDutyPrc = round(((float)rpmDutyTimeLow / _timeTotal) * 10000);
+  }
+
   rpmDutyReady = false;
 
   //digitalWrite(rpmTest, HIGH);
@@ -354,10 +358,10 @@ void ISR0() {
       if (sparkUs > 0) {
         
         if (average == 10) {
-          rpmDouble = 4800000000.0 / (double)sparkUs;
+          rpmDouble = 4800000000.0 / (float)sparkUs;
         }
         else {
-          rpmDouble = 2400000000.0 / (double)sparkUs;          
+          rpmDouble = 2400000000.0 / (float)sparkUs;          
         }
 
         rpm = round(rpmDouble);
@@ -385,7 +389,7 @@ void ISR0() {
 
 void ISR1() {
   currentUsISR1 = micros();
-  if (currentUsISR1 > currentUsISR0) rpmDuty = currentUsISR1 - currentUsISR0;
-  else rpmDuty = 0;
+  if (currentUsISR1 > currentUsISR0) rpmDutyTimeLow = currentUsISR1 - currentUsISR0;
+  else rpmDutyTimeLow = 0;
   rpmDutyReady = true;
 }
